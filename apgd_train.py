@@ -100,8 +100,14 @@ class AdversarialDINOHashModule(L.LightningModule):
         model_name: str = "vits14_reg",
         n_bits: int = 96,
         epsilon: float = 8/255,
-        lr
-
+        lr: float = 1e-4,
+        weight_decay: float = 1e-4,
+        warmup: int = 1400,
+        max_steps: int = 20000,
+        n_iter: int = 20,
+        n_iter_range: int = 0,
+        clean_weight: float = 500,
+        val_freq: int = 500
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -134,16 +140,16 @@ class AdversarialDINOHashModule(L.LightningModule):
     def configure_optimizers(self) -> Dict[str, Any]:
         optimizer = AdamW(
             self.adversarial_dinohash.dinov2.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95)
         )
         
         def lr_lambda(step: int) -> float:
-            if step < args.warmup:
-                return step / args.warmup
+            if step < self.hparams.warmup:
+                return step / self.hparams.warmup
             else:
-                progress = (step - args.warmup) / (args.max_steps - args.warmup)
+                progress = (step - self.hparams.warmup) / (self.hparams.max_steps - self.hparams.warmup)
                 return 0.5 * (1 + np.cos(np.pi * progress))
         
         scheduler = {
@@ -161,10 +167,10 @@ class AdversarialDINOHashModule(L.LightningModule):
         logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
         
         n_iter = np.random.randint(
-            args.n_iter - args.n_iter_range,
-            args.n_iter + args.n_iter_range + 1
+            self.hparams.n_iter - self.hparams.n_iter_range,
+            self.hparams.n_iter + self.hparams.n_iter_range + 1
         )
-        eps = np.random.uniform(0.5, 1.5) * args.epsilon
+        eps = np.random.uniform(0.5, 1.5) * self.hparams.epsilon
         
         logits = logits.to(self.device)
         batch = batch.to(self.device)
@@ -182,25 +188,25 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.manual_backward(adv_loss)
         
         clean_loss = torch.tensor(0.0, device=self.device)
-        if args.clean_weight > 0:
+        if self.hparams.clean_weight > 0:
             clean_hashes, clean_loss = criterion_loss(
                 batch, logits, self.adversarial_dinohash.hash, loss="target bce"
             )
-            clean_loss = args.clean_weight * clean_loss.mean()
+            clean_loss = self.hparams.clean_weight * clean_loss.mean()
             self.manual_backward(clean_loss)
         
         total_loss = adv_loss + clean_loss
-        
-        optimizer.zero_grad()
+
         optimizer.step()
         scheduler.step()
+        optimizer.zero_grad()
         
         hashes = (logits >= 0).float()
         accuracy = (adv_hashes - hashes).abs().mean()
         
         self.log('train/total_loss', total_loss, on_step=True, prog_bar=True)
         self.log('train/adv_loss', adv_loss, on_step=True)
-        self.log('train/clean_loss', clean_loss / max(args.clean_weight, 1), on_step=True)
+        self.log('train/clean_loss', clean_loss / max(self.hparams.clean_weight, 1), on_step=True)
         self.log('train/accuracy', accuracy * 100, on_step=True, prog_bar=True)
         self.log('train/lr', optimizer.param_groups[0]['lr'], on_step=True)
         
@@ -214,7 +220,7 @@ class AdversarialDINOHashModule(L.LightningModule):
             hashes = (logits >= 0).float()
             
             adv_images, _ = self.apgd.attack_single_run(
-                batch, logits, n_iter=args.n_iter * 2, eps=args.epsilon
+                batch, logits, n_iter=self.hparams.n_iter * 2, eps=self.hparams.epsilon
             )
             
             adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
@@ -223,9 +229,12 @@ class AdversarialDINOHashModule(L.LightningModule):
             clean_hashes = self.adversarial_dinohash.hash(batch).float()
             clean_accuracy = (clean_hashes - hashes).abs().mean()
         
+        # Log the monitored metric
+        self.log('val/attack_strength', attack_accuracy, on_epoch=True, prog_bar=True)
+        
         return {
-            'val_attack_strength': attack_accuracy,
-            'val_clean_error': clean_accuracy,
+            'val/attack_strength': attack_accuracy,
+            'val/clean_error': clean_accuracy,
             'batch_size': len(batch)
         }
 
@@ -233,12 +242,11 @@ def main():
     global args
 
     parser = argparse.ArgumentParser(description='Adversarial neural collision attack with Lightning')
-    parser.add_argument('--batch_size', type=int, default=200, help='Batch size for processing images')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for processing images')
     parser.add_argument('--image_dir', type=str, default='./diffusion_data', help='Directory containing images')
     parser.add_argument('--n_iter', type=int, default=20, help='Average number of iterations')
     parser.add_argument('--n_iter_range', type=int, default=0, help='Maximum number of iterations')
     parser.add_argument('--epsilon', type=float, default=8/255, help='Maximum perturbation (L∞ norm bound)')
-    parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
     parser.add_argument('--warmup', type=int, default=1400, help='Number of warmup steps')
@@ -251,10 +259,10 @@ def main():
     parser.add_argument('--model_name', type=str, default="vits14_reg", help='Model backbone for DINOv2')
     
     parser.add_argument('--project_name', type=str, default='adversarial-dinohash', help='Wandb project name')
-    parser.add_argument('--experiment_name', type=str, default=None, help='Wandb experiment name')
     parser.add_argument('--offline', action='store_true', help='Run wandb in offline mode')
     
     args = parser.parse_args()
+    torch.set_float32_matmul_precision('medium')
     
     datamodule = DINOHashDataModule(
         image_dir=args.image_dir,
@@ -283,18 +291,18 @@ def main():
     
     wandb_logger = WandbLogger(
         project=args.project_name,
-        name=args.experiment_name or f"dinohash_{args.lr}_{args.clean_weight}_{args.n_iter}",
+        name=f"dinohash_{args.lr}_{args.clean_weight}_{args.n_iter}",
         offline=args.offline,
         save_dir="./logs"
     )
-    
+
+    wandb_logger.experiment.config.update(vars(args))
+
+
     callbacks = [
         ModelCheckpoint(
             dirpath=f"./checkpoints",
             filename=f"dinov2_{args.model_name}{args.n_bits}.{args.lr}_{args.clean_weight}_{args.n_iter}_{{step}}",
-            monitor="val/attack_strength",
-            mode="max",
-            save_top_k=1,
             every_n_train_steps=args.val_freq,
             save_last=True
         ),
@@ -318,7 +326,6 @@ def main():
     trainer.fit(model, datamodule=datamodule)
     
     print("Training completed!")
-
-
+    
 if __name__ == "__main__":
     main()
