@@ -107,7 +107,8 @@ class AdversarialDINOHashModule(L.LightningModule):
         n_iter: int = 20,
         n_iter_range: int = 0,
         clean_weight: float = 500,
-        val_freq: int = 500
+        val_freq: int = 500,
+        l2_sp: bool = True
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -141,7 +142,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         optimizer = AdamW(
             self.adversarial_dinohash.dinov2.parameters(),
             lr=self.hparams.lr,
-            weight_decay=self.hparams.weight_decay,
+            weight_decay=0 if self.hparams.l2_sp else self.hparams.weight_decay,
             betas=(0.9, 0.95)
         )
         
@@ -166,10 +167,14 @@ class AdversarialDINOHashModule(L.LightningModule):
         
         logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
         
+        # sample base n_iter, then double after half of max_steps
         n_iter = np.random.randint(
             self.hparams.n_iter - self.hparams.n_iter_range,
             self.hparams.n_iter + self.hparams.n_iter_range + 1
         )
+        # if self.global_step >= (self.hparams.max_steps // 2):
+        #     n_iter *= 2
+
         eps = np.random.uniform(0.5, 1.5) * self.hparams.epsilon
         
         logits = logits.to(self.device)
@@ -178,14 +183,24 @@ class AdversarialDINOHashModule(L.LightningModule):
         adv_images, _ = self.apgd.attack_single_run(
             batch, logits, n_iter, log=False, eps=eps
         )
+
         
+        if self.hparams.l2_sp:
+            reg_loss = l2_sp(
+                self.adversarial_dinohash.dinov2, 
+                self.clean_dinohash.dinov2, 
+                alpha=self.hparams.weight_decay
+            )
+        else:
+            reg_loss = torch.tensor(0.0, device=self.device)
+
         self.adversarial_dinohash.dinov2.train()
         
         adv_hashes, adv_loss = criterion_loss(
             adv_images, logits, self.adversarial_dinohash.hash, loss="target bce"
         )
         adv_loss = adv_loss.mean()
-        self.manual_backward(adv_loss)
+        self.manual_backward(adv_loss + reg_loss)
         
         clean_loss = torch.tensor(0.0, device=self.device)
         if self.hparams.clean_weight > 0:
@@ -218,25 +233,35 @@ class AdversarialDINOHashModule(L.LightningModule):
         with torch.no_grad():
             logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
             hashes = (logits >= 0).float()
-            
+
             adv_images, _ = self.apgd.attack_single_run(
-                batch, logits, n_iter=self.hparams.n_iter * 2, eps=self.hparams.epsilon
+                batch, logits, n_iter=50, eps=self.hparams.epsilon
             )
             
             adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
-            attack_accuracy = (adv_hashes - hashes).abs().mean()
+            attack_accuracy = (adv_hashes - hashes).abs().mean() * 100
             
             clean_hashes = self.adversarial_dinohash.hash(batch).float()
-            clean_accuracy = (clean_hashes - hashes).abs().mean()
+            clean_accuracy = (clean_hashes - hashes).abs().mean() * 100
         
         # Log the monitored metric
         self.log('val/attack_strength', attack_accuracy, on_epoch=True, prog_bar=True)
-        
+        self.log('val/clean_error', clean_accuracy, on_epoch=True, prog_bar=True)
+
         return {
             'val/attack_strength': attack_accuracy,
             'val/clean_error': clean_accuracy,
             'batch_size': len(batch)
         }
+
+def l2_sp(model1, model2, alpha):
+    reg_loss = 0
+    params_index = -1
+    for param1, param2 in zip(model1.parameters(), model2.parameters()):
+        params_index += 1
+        reg_loss += 0.5* alpha * (param1 - param2).norm(2)**2
+
+    return reg_loss
 
 def main():
     global args
@@ -257,6 +282,7 @@ def main():
     parser.add_argument('--resume_path', type=str, default=None, help='Resume path')
     parser.add_argument('--n_bits', type=int, default=96, help='Number of PCA components for DINOHash')
     parser.add_argument('--model_name', type=str, default="vits14_reg", help='Model backbone for DINOv2')
+    parser.add_argument('--l2_sp', type=bool, default=True, help='L2 similarity penalty between clean and adversarial DINOHash')
     
     parser.add_argument('--project_name', type=str, default='adversarial-dinohash', help='Wandb project name')
     parser.add_argument('--offline', action='store_true', help='Run wandb in offline mode')
@@ -286,8 +312,8 @@ def main():
     )
     
     if args.resume_path:
-        checkpoint = torch.load(args.resume_path)
-        model.adversarial_dinohash.dinov2.load_state_dict(checkpoint)
+        checkpoint = torch.load(args.resume_path, weights_only=False)
+        model.adversarial_dinohash.dinov2.load_state_dict(checkpoint["state_dict"])
     
     wandb_logger = WandbLogger(
         project=args.project_name,
