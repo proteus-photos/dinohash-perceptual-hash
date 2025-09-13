@@ -23,7 +23,10 @@ const MODEL_URLS = {
   "dino_mnv2_sslight_traced": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/dino_mnv2_sslight_traced.onnx",
   "dino_vitt16_sslight_traced": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/dino_vitt16_sslight_traced.onnx",
   "moco_mnv2_sslight_traced": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/moco_mnv2_sslight_traced.onnx",
-  "swav_mnv2_sslight_traced": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/swav_mnv2_sslight_traced.onnx"
+  "swav_mnv2_sslight_traced": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/swav_mnv2_sslight_traced.onnx",
+  "ResNet-101–Efficient-B0_scripted": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/ResNet-101–Efficient-B0_scripted.onnx",
+  "dino_r18_sslight_scripted":"https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/dino_r18_sslight_scripted.onnx",
+  "dino_r34_sslight_scripted": "https://huggingface.co/dantehrani/proteus-models/resolve/main/onnx/dino_r34_sslight_scripted.onnx"
 }
 
 const getModels = () => {
