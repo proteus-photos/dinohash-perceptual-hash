@@ -2,6 +2,7 @@
 **/imagenet
 *.sh
 *.pth
+*.pt
 /old/weights/
 /datasets/
 /dataset/
@@ -19,5 +20,12 @@
 /node_package/node_modules
 /node_package/package-lock.json
 /node_package/models/
+/node_package/examples/models/
 dinov2_vitb14_reg_512bit_dynamic.onnx
 dinov2_vits14_reg_96bit_dynamic.onnx
+.venv/
+onnx/
+.DS_Store
+
+pretrained-models/*
+params/*
