@@ -24,7 +24,7 @@ def download_params(model_name):
     os.makedirs("./params", exist_ok=True)
     print(f"Downloading params for model {model_name}")
 
-    PCA_path = hf_hub_download(
+    hf_hub_download(
         repo_id="dantehrani/proteus-models",
         filename=f"params/{model_name}_PCA.npy",
         revision="main",
@@ -32,9 +32,8 @@ def download_params(model_name):
         local_dir="./",
     )
 
-    print(f"PCA downloaded to {PCA_path}")
 
-    means_path = hf_hub_download(
+    hf_hub_download(
         repo_id="dantehrani/proteus-models",
         filename=f"params/{model_name}_means.npy",
         revision="main",
@@ -42,7 +41,8 @@ def download_params(model_name):
         local_dir="./",
     )
 
-    print(f"Means downloaded to {means_path}")
+    print(f"Params downloaded for model {model_name}")
+
 
 # Export a model to ONNX to the onnx folder
 def export_model(model_name):
@@ -62,8 +62,6 @@ def export_model(model_name):
     components = components.T
     components_torch = torch.from_numpy(components).float()
 
-    #! Commented out because this causes the export to fail
-    """
     # integrate linear component to mimic PCA
     linear = nn.Linear(components_torch.shape[0], components_torch.shape[1])
     linear.weight.data = nn.parameter.Parameter(components_torch.T)
@@ -73,7 +71,8 @@ def export_model(model_name):
         model,
         linear
     )
-    """
+
+    scripted_model = torch.jit.script(model)
 
     batch_size = 42  # can be set to anything
     example = torch.rand(batch_size, 3, 224, 224)
@@ -86,7 +85,7 @@ def export_model(model_name):
     }
 
     torch.onnx.export(
-        model,
+        scripted_model,
         (example,),
         f"./onnx/{model_name}.onnx",
         opset_version=17,
@@ -101,6 +100,8 @@ def export_model(model_name):
 
 
 if __name__ == "__main__":
+    os.makedirs("./onnx", exist_ok=True)
+    
     # Get the list of models from the huggingface repo
     files = list_repo_files("dantehrani/proteus-models", repo_type="model")
 
