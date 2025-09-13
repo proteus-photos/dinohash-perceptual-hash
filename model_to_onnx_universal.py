@@ -43,7 +43,6 @@ def download_params(model_name):
 
     print(f"Params downloaded for model {model_name}")
 
-
 # Export a model to ONNX to the onnx folder
 def export_model(model_name):
     print(f"Exporting model {model_name} to ONNX")
@@ -54,12 +53,10 @@ def export_model(model_name):
     # Load the model
     model = torch.jit.load(f"./pretrained-models/{model_name}.pt", map_location="cpu").eval()
     
-    
     means = np.load(f'./params/{model_name}_means.npy')
     means_torch = torch.from_numpy(means).float()
     
     components = np.load(f'./params/{model_name}_PCA.npy').T
-    components = components.T
     components_torch = torch.from_numpy(components).float()
 
     # integrate linear component to mimic PCA
@@ -67,17 +64,11 @@ def export_model(model_name):
     linear.weight.data = nn.parameter.Parameter(components_torch.T)
     linear.bias.data = nn.parameter.Parameter(-means_torch@components_torch)
 
-    model = nn.Sequential(
-        model,
-        linear
-    )
-
+    model = nn.Sequential(model, linear)
     scripted_model = torch.jit.script(model)
 
     batch_size = 42  # can be set to anything
     example = torch.rand(batch_size, 3, 224, 224)
-
-    example = torch.rand(1, 3, 224, 224)  # use batch=1 for export; we’ll make it dynamic
 
     dynamic_axes = {
         'input': {0: 'batch_size'},
@@ -96,7 +87,6 @@ def export_model(model_name):
     )    
 
     print(f"Model {model_name} exported to ONNX\n")
-
 
 
 if __name__ == "__main__":
