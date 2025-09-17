@@ -8,10 +8,13 @@ import torchvision.transforms as T
 from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
 
-from hashes.dinohash import preprocess, dinohash, dinov2, load_model
 from apgd_attack import APGDAttack
+from hashes.dinohash import DINOHash, preprocess
 
-load_model("train_models/dinov2_0.0001_500.0_20000_10.pth")
+
+dinohash = DINOHash(pca_dims=96, model="vits14_reg", prod_mode=False)
+dinohash.load_model("train_models/dinov2_0.0001_500.0_20000_10.pth")
+# load_model("train_models/dinov2_0.0001_500.0_20000_10.pth")
 
 class ImageDataset(Dataset):
     def __init__(self, image_files):
@@ -39,7 +42,7 @@ args = parser.parse_args()
 
 image_files = [f for f in os.listdir(args.image_dir) if os.path.isfile(os.path.join(args.image_dir, f))]
 image_files.sort()
-image_files = image_files[-200_000:]
+image_files = image_files[1_800_000:]
 
 dataset = ImageDataset(image_files)
 dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)

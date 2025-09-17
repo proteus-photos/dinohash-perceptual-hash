@@ -326,3 +326,273 @@ class APGDAttack():
                 counter3 = 0
     
         return (x_best, loss_best)
+
+class PGDAttack():
+    def __init__(
+            self,
+            dinohash,
+            eps,
+            norm='Linf',
+            seed=0,
+            rho=.75,
+            topk=None,
+            verbose=False,
+            device="cuda"):
+        
+        self.hasher = dinohash.hash
+        self.norm = norm
+        self.eps = eps
+        self.seed = seed
+        self.thr_decr = rho
+        self.topk = topk
+        self.verbose = verbose
+        self.device = device
+        self.use_rs = True
+
+        assert self.norm in ['Linf', 'L2', 'L1']
+
+    def check_oscillation(self, x, j, k, y5, k3=0.75):
+        t = torch.zeros(x.shape[1]).to(self.device)
+        for counter5 in range(k):
+            t += (x[j - counter5] > x[j - counter5 - 1]).float()
+
+        return (t <= k * k3 * torch.ones_like(t)).float()
+
+    def check_shape(self, x):
+        return x if len(x.shape) > 0 else x.unsqueeze(0)
+
+    def normalize(self, x):
+        if self.norm == 'Linf':
+            t = x.abs().view(x.shape[0], -1).max(1)[0]
+
+        elif self.norm == 'L2':
+            t = (x ** 2).view(x.shape[0], -1).sum(-1).sqrt()
+
+        elif self.norm == 'L1':
+            try:
+                t = x.abs().view(x.shape[0], -1).sum(dim=-1)
+            except:
+                t = x.abs().reshape([x.shape[0], -1]).sum(dim=-1)
+
+        return x / (t.view(-1, *([1] * self.n_dims)) + 1e-12)
+
+    @torch.no_grad()
+    def attack_single_run(self, x, original_logits, n_iter=50, eps=None, log=False):
+        
+        if eps is not None:
+            self.eps = eps
+
+        original_hash = (original_logits >= 0).float()
+        x = x.to(device=self.device)
+        self.orig_dim = list(x.shape[1:])
+        self.n_dims = len(self.orig_dim)
+        
+        self.n_iter = n_iter
+
+        if self.norm == 'Linf':
+            t = 2 * torch.rand(x.shape).to(self.device).detach() - 1
+            x_adv = x + self.eps * torch.ones_like(x
+                ).detach() * self.normalize(t)
+        elif self.norm == 'L2':
+            t = torch.randn(x.shape).to(self.device).detach()
+            x_adv = x + self.eps * torch.ones_like(x
+                ).detach() * self.normalize(t)
+        elif self.norm == 'L1':
+            t = torch.randn(x.shape).to(self.device).detach()
+            delta = L1_projection(x, t, self.eps)
+            x_adv = x + t + delta
+        
+        #### NO NOISE VERSION
+        # x_adv = x.clone()
+
+        x_adv = x_adv.clamp(0., 1.)
+        x_best = x_adv.clone()
+
+        loss_steps = torch.zeros([self.n_iter, x.shape[0]]).to(self.device)
+        loss_best_steps = torch.zeros([self.n_iter + 1, x.shape[0]]).to(self.device)
+        
+        grad = torch.zeros_like(x)
+
+        hash, loss_indiv, grad = hash_loss_grad(x_adv, original_logits, self.hasher)
+
+        # print("Initial Distance: ", (hash - original_hash).abs().mean().item())
+        
+        grad_best = grad.clone()
+        
+        loss_best = loss_indiv.detach().clone()
+
+        alpha = 2. if self.norm in ['Linf', 'L2'] else 1. if self.norm in ['L1'] else 2e-2
+        step_size = alpha * self.eps * torch.ones([x.shape[0], *(
+            [1] * self.n_dims)]).to(self.device).detach()
+
+        n_fts = math.prod(self.orig_dim)
+        if self.norm == 'L1':
+            topk = .2 * torch.ones([x.shape[0]], device=self.device)
+
+        u = torch.arange(x.shape[0], device=self.device)
+        for i in range(self.n_iter):
+            x_adv = x_adv.detach()
+
+            if self.norm == 'Linf':
+                x_adv_1 = project(x_adv + step_size * torch.sign(grad), x, self.eps)
+
+            elif self.norm == 'L2':
+                x_adv_1 = x_adv + step_size * self.normalize(grad)
+                x_adv_1 = torch.clamp(x + self.normalize(x_adv_1 - x
+                    ) * torch.min(self.eps * torch.ones_like(x).detach(),
+                    L2_norm(x_adv_1 - x, keepdim=True)), 0.0, 1.0)
+
+            elif self.norm == 'L1':
+                grad_topk = grad.abs().view(x.shape[0], -1).sort(-1)[0]
+                topk_curr = torch.clamp((1. - topk) * n_fts, min=0, max=n_fts - 1).long()
+                grad_topk = grad_topk[u, topk_curr].view(-1, *[1]*(len(x.shape) - 1))
+                sparsegrad = grad * (grad.abs() >= grad_topk).float()
+                x_adv_1 = x_adv + step_size * sparsegrad.sign() / (
+                    L1_norm(sparsegrad.sign(), keepdim=True) + 1e-10)
+                
+                delta_u = x_adv_1 - x
+                delta_p = L1_projection(x, delta_u, self.eps)
+                x_adv_1 = x + delta_u + delta_p
+                
+                
+            x_adv = x_adv_1 + 0.
+
+            hash, loss_indiv, grad = hash_loss_grad(x_adv, original_logits, self.hasher)
+            binarized_hash = (hash >= 0.5).float()
+
+            if log:
+                print((binarized_hash - original_hash).abs().mean().item())
+
+            y1 = loss_indiv.detach().clone()
+            loss_steps[i] = y1 + 0
+            ind = (y1 > loss_best).nonzero().squeeze()
+            x_best[ind] = x_adv[ind].clone()
+            grad_best[ind] = grad[ind].clone()
+            loss_best[ind] = y1[ind] + 0
+            loss_best_steps[i + 1] = loss_best + 0
+    
+        return (x_best, loss_best)
+
+class FGSMAttack():
+    def __init__(
+            self,
+            dinohash,
+            eps,
+            norm='Linf',
+            seed=0,
+            rho=.75,
+            topk=None,
+            verbose=False,
+            device="cuda"):
+        
+        self.hasher = dinohash.hash
+        self.norm = norm
+        self.eps = eps
+        self.seed = seed
+        self.thr_decr = rho
+        self.topk = topk
+        self.verbose = verbose
+        self.device = device
+        self.use_rs = True
+
+        assert self.norm in ['Linf', 'L2', 'L1']
+
+    def check_oscillation(self, x, j, k, y5, k3=0.75):
+        t = torch.zeros(x.shape[1]).to(self.device)
+        for counter5 in range(k):
+            t += (x[j - counter5] > x[j - counter5 - 1]).float()
+
+        return (t <= k * k3 * torch.ones_like(t)).float()
+
+    def check_shape(self, x):
+        return x if len(x.shape) > 0 else x.unsqueeze(0)
+
+    def normalize(self, x):
+        if self.norm == 'Linf':
+            t = x.abs().view(x.shape[0], -1).max(1)[0]
+
+        elif self.norm == 'L2':
+            t = (x ** 2).view(x.shape[0], -1).sum(-1).sqrt()
+
+        elif self.norm == 'L1':
+            try:
+                t = x.abs().view(x.shape[0], -1).sum(dim=-1)
+            except:
+                t = x.abs().reshape([x.shape[0], -1]).sum(dim=-1)
+
+        return x / (t.view(-1, *([1] * self.n_dims)) + 1e-12)
+
+    @torch.no_grad()
+    def attack_single_run(self, x, original_logits, n_iter=50, eps=None, log=False):
+        
+        if eps is not None:
+            self.eps = eps
+
+        original_hash = (original_logits >= 0).float()
+        x = x.to(device=self.device)
+        self.orig_dim = list(x.shape[1:])
+        self.n_dims = len(self.orig_dim)
+        
+        self.n_iter = n_iter
+
+        # Start with clean images for FGSM
+        x_adv = x.clone()
+        x_best = x_adv.clone()
+
+        loss_steps = torch.zeros([self.n_iter, x.shape[0]]).to(self.device)
+        loss_best_steps = torch.zeros([self.n_iter + 1, x.shape[0]]).to(self.device)
+        
+        grad = torch.zeros_like(x)
+
+        hash, loss_indiv, grad = hash_loss_grad(x_adv, original_logits, self.hasher)
+
+        # print("Initial Distance: ", (hash - original_hash).abs().mean().item())
+        
+        grad_best = grad.clone()
+        
+        loss_best = loss_indiv.detach().clone()
+
+        n_fts = math.prod(self.orig_dim)
+        if self.norm == 'L1':
+            topk = .2 * torch.ones([x.shape[0]], device=self.device)
+
+        u = torch.arange(x.shape[0], device=self.device)
+        
+        # FGSM: Single step attack using initial gradient
+        if self.norm == 'Linf':
+            x_adv = project(x + self.eps * torch.sign(grad), x, self.eps)
+
+        elif self.norm == 'L2':
+            x_adv = x + self.eps * self.normalize(grad)
+            x_adv = torch.clamp(x + self.normalize(x_adv - x
+                ) * torch.min(self.eps * torch.ones_like(x).detach(),
+                L2_norm(x_adv - x, keepdim=True)), 0.0, 1.0)
+
+        elif self.norm == 'L1':
+            grad_topk = grad.abs().view(x.shape[0], -1).sort(-1)[0]
+            topk_curr = torch.clamp((1. - topk) * n_fts, min=0, max=n_fts - 1).long()
+            grad_topk = grad_topk[u, topk_curr].view(-1, *[1]*(len(x.shape) - 1))
+            sparsegrad = grad * (grad.abs() >= grad_topk).float()
+            x_adv = x + self.eps * sparsegrad.sign() / (
+                L1_norm(sparsegrad.sign(), keepdim=True) + 1e-10)
+            
+            delta_u = x_adv - x
+            delta_p = L1_projection(x, delta_u, self.eps)
+            x_adv = x + delta_u + delta_p
+
+        # Evaluate final attack
+        hash, loss_indiv, grad = hash_loss_grad(x_adv, original_logits, self.hasher)
+        binarized_hash = (hash >= 0.5).float()
+
+        if log:
+            print((binarized_hash - original_hash).abs().mean().item())
+
+        x_best = x_adv.clone()
+        loss_best = loss_indiv.detach().clone()
+
+        # Fill tracking arrays for compatibility
+        for i in range(self.n_iter):
+            loss_steps[i] = loss_best + 0
+            loss_best_steps[i + 1] = loss_best + 0
+    
+        return (x_best, loss_best)

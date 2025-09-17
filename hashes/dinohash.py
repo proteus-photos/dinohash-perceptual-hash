@@ -37,7 +37,7 @@ from typing import Union, List
 import sys
 
 class DINOHash:
-    def __init__(self, pca_dims=96, model="vits14_reg", prod_mode=True):
+    def __init__(self, pca_dims=96, model="vits14_reg", prod_mode=True, random_hyperplanes=False):
         self.pca_dims = pca_dims
         self.model = model
         self.prod_mode = prod_mode
@@ -46,14 +46,19 @@ class DINOHash:
         for param in self.dinov2.parameters():
             param.requires_grad = False
         self.dinov2.eval()
+        if random_hyperplanes:
+            torch.manual_seed(pca_dims)
+            self.components_torch = torch.randn((self.dinov2.embed_dim, self.pca_dims)).cuda().float()
+            self.means_torch = torch.zeros((self.dinov2.embed_dim,)).cuda().float()
+        else:
+            means = np.load(f'./hashes/dinov2_{self.model}_means.npy')
+            self.means_torch = torch.from_numpy(means).cuda().float()
 
-        means = np.load(f'./hashes/dinov2_{self.model}_means.npy')
-        self.means_torch = torch.from_numpy(means).cuda().float()
-
-        components = np.load(f'./hashes/dinov2_{self.model}_PCA.npy').T
-        self.components_torch = torch.from_numpy(components).cuda().float()
+            components = np.load(f'./hashes/dinov2_{self.model}_PCA.npy').T
+            self.components_torch = torch.from_numpy(components).cuda().float()
     
     def load_model(self, path):
+        weights = torch.load(path, weights_only=True)
         self.dinov2.load_state_dict(torch.load(path, weights_only=True))
     
     def hash(
