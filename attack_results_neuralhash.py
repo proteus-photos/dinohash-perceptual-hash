@@ -40,7 +40,7 @@ for image_tensors, labels in tqdm(dataloader):
 
 
     attack_start = time.time()
-    adv_images, _ = apgd.attack_single_run(image_tensors, logits, n_iter=10)
+    adv_images, _ = apgd.attack_single_run(image_tensors, logits, n_iter=100)
     attack_end = time.time()
     print(f"Attack time: {attack_end - attack_start}")
 
