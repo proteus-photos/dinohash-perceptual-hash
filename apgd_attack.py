@@ -135,7 +135,7 @@ class APGDAttack():
             verbose=False,
             device="cuda"):
         
-        self.hasher = dinohash.hash
+        self.hasher = dinohash.forward
         self.norm = norm
         self.eps = eps
         self.seed = seed
@@ -240,6 +240,7 @@ class APGDAttack():
 
         u = torch.arange(x.shape[0], device=self.device)
         for i in range(self.n_iter):
+            print(f"Iteration {i}/{self.n_iter}")
             x_adv = x_adv.detach()
             grad2 = x_adv - x_adv_old
             x_adv_old = x_adv.clone()
