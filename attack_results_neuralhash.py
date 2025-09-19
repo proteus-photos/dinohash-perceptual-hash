@@ -19,7 +19,7 @@ preprocess = transforms.Compose([
 
 data_set = datasets.CIFAR10(root="./data", train=True, download=True, transform=preprocess)
 
-mnist_subset = Subset(data_set, range(100))  # first 100 samples
+mnist_subset = Subset(data_set, range(1000))  # first 100 samples
 dataloader = DataLoader(mnist_subset, batch_size=256, shuffle=False)
 
 print("Dataloader loaded")
