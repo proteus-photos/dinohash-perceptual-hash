@@ -60,7 +60,7 @@ hasher = dinohash
 dataset_folder = './diffusion_data'
 image_files = [f for f in os.listdir(dataset_folder)]
 image_files.sort()
-image_files = image_files[:100_000]
+image_files = image_files[1_800_000:]
 
 BATCH_SIZE = 256
 # N_IMAGE_RETRIEVAL = 1

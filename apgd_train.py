@@ -220,8 +220,8 @@ class AdversarialDINOHashModule(L.LightningModule):
             adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
             attack_accuracy = (adv_hashes - clean_hashes).abs().mean()
         
-        self.log('val/attack_strength', attack_accuracy, on_epoch=True, prog_bar=True)
-        self.log('val/clean_error', clean_accuracy, on_epoch=True, prog_bar=True)
+        self.log('val/attack_strength', attack_accuracy * 100, on_epoch=True, prog_bar=True)
+        self.log('val/clean_error', clean_accuracy * 100, on_epoch=True, prog_bar=True)
 
 def main():
     global args
@@ -233,8 +233,8 @@ def main():
     parser.add_argument('--n_iter_range', type=int, default=0, help='Maximum number of iterations')
     parser.add_argument('--epsilon', type=float, default=8/255, help='Maximum perturbation (L∞ norm bound)')
     parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=2e-4, help='Weight decay')
+    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
     parser.add_argument('--warmup', type=int, default=1400, help='Number of warmup steps')
     parser.add_argument('--steps', type=int, default=20000, help='Number of steps')
     parser.add_argument('--start_step', type=int, default=0, help='Starting step')
