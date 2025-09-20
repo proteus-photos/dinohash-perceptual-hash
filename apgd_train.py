@@ -20,7 +20,7 @@ from utils import AverageMeter
 # Set seeds for reproducibility
 torch.manual_seed(0)
 np.random.seed(0)
-
+torch.set_float32_matmul_precision("medium")
 
 class ImageDataset(Dataset):
     """Dataset class for loading and preprocessing images."""
@@ -99,9 +99,6 @@ class AdversarialDINOHashModule(L.LightningModule):
         self,
         model_name: str = "vits14_reg",
         n_bits: int = 96,
-        epsilon: float = 8/255,
-        lr
-
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -126,7 +123,7 @@ class AdversarialDINOHashModule(L.LightningModule):
             
         self.apgd = APGDAttack(
             dinohash=self.adversarial_dinohash, 
-            eps=epsilon
+            eps=args.epsilon
         )
         
         self.automatic_optimization = False
@@ -198,7 +195,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         hashes = (logits >= 0).float()
         accuracy = (adv_hashes - hashes).abs().mean()
         
-        self.log('train/total_loss', total_loss, on_step=True, prog_bar=True)
+        self.log('train/total_loss', total_loss, on_step=True)
         self.log('train/adv_loss', adv_loss, on_step=True)
         self.log('train/clean_loss', clean_loss / max(args.clean_weight, 1), on_step=True)
         self.log('train/accuracy', accuracy * 100, on_step=True, prog_bar=True)
@@ -217,17 +214,14 @@ class AdversarialDINOHashModule(L.LightningModule):
                 batch, logits, n_iter=args.n_iter * 2, eps=args.epsilon
             )
             
-            adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
-            attack_accuracy = (adv_hashes - hashes).abs().mean()
-            
             clean_hashes = self.adversarial_dinohash.hash(batch).float()
             clean_accuracy = (clean_hashes - hashes).abs().mean()
+
+            adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
+            attack_accuracy = (adv_hashes - clean_hashes).abs().mean()
         
-        return {
-            'val_attack_strength': attack_accuracy,
-            'val_clean_error': clean_accuracy,
-            'batch_size': len(batch)
-        }
+        self.log('val/attack_strength', attack_accuracy, on_epoch=True, prog_bar=True)
+        self.log('val/clean_error', clean_accuracy, on_epoch=True, prog_bar=True)
 
 def main():
     global args
@@ -240,7 +234,7 @@ def main():
     parser.add_argument('--epsilon', type=float, default=8/255, help='Maximum perturbation (L∞ norm bound)')
     parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
+    parser.add_argument('--weight_decay', type=float, default=2e-4, help='Weight decay')
     parser.add_argument('--warmup', type=int, default=1400, help='Number of warmup steps')
     parser.add_argument('--steps', type=int, default=20000, help='Number of steps')
     parser.add_argument('--start_step', type=int, default=0, help='Starting step')
@@ -266,15 +260,6 @@ def main():
     model = AdversarialDINOHashModule(
         model_name=args.model_name,
         n_bits=args.n_bits,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        warmup=args.warmup,
-        max_steps=args.steps,
-        epsilon=args.epsilon,
-        n_iter=args.n_iter,
-        n_iter_range=args.n_iter_range,
-        clean_weight=args.clean_weight,
-        val_freq=args.val_freq
     )
     
     if args.resume_path:

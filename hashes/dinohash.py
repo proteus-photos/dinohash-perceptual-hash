@@ -35,9 +35,11 @@ from torchvision import transforms
 from PIL import Image
 from typing import Union, List
 import sys
+from torch import nn
 
-class DINOHash:
+class DINOHash(nn.Module):
     def __init__(self, pca_dims=96, model="vits14_reg", prod_mode=True):
+        super(DINOHash, self).__init__()
         self.pca_dims = pca_dims
         self.model = model
         self.prod_mode = prod_mode
@@ -52,9 +54,6 @@ class DINOHash:
 
         components = np.load(f'./hashes/dinov2_{self.model}_PCA.npy').T
         self.components_torch = torch.from_numpy(components).cuda().float()
-    
-    def load_model(self, path):
-        self.dinov2.load_state_dict(torch.load(path, weights_only=True))
     
     def hash(
         self,

@@ -398,7 +398,7 @@ class NeuralHash(nn.Module):
         else:
             print('All parameters assigned')
 
-    def forward(self, input):
+    def forward(self, input, differentiable=False, c=1, logits=False, l2_normalize=False):
         # Conv0
         x = self.conv0(input)
         # Bottleneck1

@@ -8,10 +8,13 @@ import torchvision.transforms as T
 from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
 
-from hashes.dinohash import preprocess, dinohash, dinov2, load_model
+from hashes.dinohash import preprocess, DINOHash
 from apgd_attack import APGDAttack
 
-load_model("train_models/dinov2_0.0001_500.0_20000_10.pth")
+adversarial_dinohash = DINOHash(pca_dims=96, model="vits14_reg", prod_mode=False)
+adversarial_dinohash.load_model("train_models/dinov2_0.0001_500.0_20000_10.pth")
+
+clean_dinohash = DINOHash(pca_dims=96, model="vits14_reg", prod_mode=False)
 
 class ImageDataset(Dataset):
     def __init__(self, image_files):
@@ -39,22 +42,19 @@ args = parser.parse_args()
 
 image_files = [f for f in os.listdir(args.image_dir) if os.path.isfile(os.path.join(args.image_dir, f))]
 image_files.sort()
-image_files = image_files[-200_000:]
+image_files = image_files[1_800_000:]
 
 dataset = ImageDataset(image_files)
 dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-apgd = APGDAttack(eps=args.epsilon)
-dinov2.eval()
-for param in dinov2.parameters():
-    param.requires_grad = False
+apgd = APGDAttack(dinohash=adversarial_dinohash, eps=args.epsilon)
 
 accs = 0
 count = 0
 for image_tensors, names in tqdm(dataloader):
-    logits = dinohash(image_tensors, differentiable=False, logits=True, prod_output=False)
+    logits = adversarial_dinohash.hash(image_tensors, differentiable=False, logits=True)
     adv_images, _ = apgd.attack_single_run(image_tensors, logits, 100)
-    adv_logits = dinohash(adv_images, differentiable=False, logits=True, prod_output=False)
+    adv_logits = adversarial_dinohash.hash(adv_images, differentiable=False, logits=True)
     acc = ((adv_logits>=0) == (logits>=0)).float().mean(1).cpu().numpy()
     accs += acc.sum().item()
     count += len(acc)
