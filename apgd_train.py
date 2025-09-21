@@ -20,6 +20,7 @@ from utils import AverageMeter
 # Set seeds for reproducibility
 torch.manual_seed(0)
 np.random.seed(0)
+torch.set_float32_matmul_precision("medium")
 
 
 class ImageDataset(Dataset):
