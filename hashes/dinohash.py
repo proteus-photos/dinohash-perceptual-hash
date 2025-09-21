@@ -35,9 +35,11 @@ from torchvision import transforms
 from PIL import Image
 from typing import Union, List
 import sys
+import torch.nn as nn
 
-class DINOHash:
+class DINOHash(nn.Module):
     def __init__(self, pca_dims=96, model="vits14_reg", prod_mode=True, random_hyperplanes=False):
+        super(DINOHash, self).__init__()
         self.pca_dims = pca_dims
         self.model = model
         self.prod_mode = prod_mode
@@ -45,6 +47,7 @@ class DINOHash:
         self.dinov2 = torch.hub.load('facebookresearch/dinov2', f'dinov2_{self.model}').cuda()
         for param in self.dinov2.parameters():
             param.requires_grad = False
+            
         self.dinov2.eval()
         if random_hyperplanes:
             torch.manual_seed(pca_dims)

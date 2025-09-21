@@ -13,7 +13,7 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 
 from hashes.dinohash import DINOHash, preprocess
-from apgd_attack import APGDAttack, criterion_loss, PGDAttack, FGSMAttack
+from apgd_attack import APGDAttack, criterion_loss
 from utils import AverageMeter
 
 
@@ -122,7 +122,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         for param in self.adversarial_dinohash.dinov2.parameters():
             param.requires_grad = True
             
-        self.apgd = FGSMAttack(
+        self.apgd = APGDAttack(
             dinohash=self.adversarial_dinohash, 
             eps=args.epsilon
         )
@@ -212,7 +212,7 @@ class AdversarialDINOHashModule(L.LightningModule):
             hashes = (logits >= 0).float()
             
             adv_images, _ = self.apgd.attack_single_run(
-                batch, logits, n_iter=args.n_iter * 2, eps=args.epsilon
+                batch, logits, n_iter=50, eps=args.epsilon
             )
             
             adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
@@ -221,9 +221,12 @@ class AdversarialDINOHashModule(L.LightningModule):
             clean_hashes = self.adversarial_dinohash.hash(batch).float()
             clean_accuracy = (clean_hashes - hashes).abs().mean()
         
+        self.log('val/attack_strength', attack_accuracy * 100, on_epoch=True, prog_bar=True)
+        self.log('val/clean_error', clean_accuracy * 100, on_epoch=True, prog_bar=True)
+        
         return {
-            'val_attack_strength': attack_accuracy,
-            'val_clean_error': clean_accuracy,
+            'val/attack_strength': attack_accuracy * 100,
+            'val/clean_error': clean_accuracy * 100,
             'batch_size': len(batch)
         }
 
