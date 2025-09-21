@@ -10,42 +10,66 @@ from apgd_attack import APGDAttack
 from paper_results.temp_neuralhash import NeuralHash
 import time
 from torchvision import datasets, transforms
+import onnx
 
-preprocess = transforms.Compose([
-    transforms.Grayscale(num_output_channels=3),  # convert 1 → 3 channels
-    transforms.Resize((360, 360)),
-    transforms.ToTensor(),
-])
+preprocess = lambda x: np.array(x.convert("RGB").resize([360, 360])).astype(np.float32) / 255.0
 
-data_set = datasets.CIFAR10(root="./data", train=True, download=True, transform=preprocess)
+class ImageDataset(Dataset):
+    def __init__(self, image_files):
+        self.image_files = image_files
 
-mnist_subset = Subset(data_set, range(1000))  # first 100 samples
-dataloader = DataLoader(mnist_subset, batch_size=256, shuffle=False)
+    def __len__(self):
+        return len(self.image_files)
 
-print("Dataloader loaded")
+    def __getitem__(self, idx):
+        image = Image.open(self.image_files[idx]).convert("RGB")
+        return preprocess(image).transpose(2,0,1), self.image_files[idx]
 
-epsilon = 8/255
 
-neuralhash = NeuralHash()
+image_files = ["./test.png"]
+
+dataset = ImageDataset(image_files)
+dataloader = DataLoader(dataset, batch_size=10, shuffle=False)
+
+epsilon = 64
+
+onnx_model = onnx.load("./hashes/model.onnx")
+neuralhash = NeuralHash(onnx_model)
+
 apgd = APGDAttack(neuralhash, eps=epsilon, device="cpu")
+
+acc_hamming_distance = 0
+images_processed = 0
 
 accs = 0
 count = 0
+
 for image_tensors, labels in tqdm(dataloader):
-    # logits = dinohash(image_tensors, differentiable=False, logits=True, prod_output=False)
     forward_start = time.time()
     logits = neuralhash.forward(image_tensors)
     forward_end = time.time()
-    print(f"Forward time: {forward_end - forward_start}")
-
 
     attack_start = time.time()
-    adv_images, _ = apgd.attack_single_run(image_tensors, logits, n_iter=100)
+    adv_images, _ = apgd.attack_single_run(image_tensors, logits, n_iter=10)
     attack_end = time.time()
-    print(f"Attack time: {attack_end - attack_start}")
 
-    adv_logits = neuralhash.forward(adv_images)
-    print(adv_logits)
+    first_attack_image = adv_images[0]
+    to_pil = transforms.ToPILImage()
+    img = to_pil(first_attack_image)
+    img.save(f"first_attack_image2.png")
+
+    adv_logits = neuralhash.forward(adv_images, c=20, logits=True)
+
+    adv_logits_bits = (adv_logits[0]>=0).flatten()
+    logits_bits = (logits[0]>=0).flatten()
+
+    adv_logits_str = "".join(['1' if b else '0' for b in adv_logits_bits])
+    logits_str = "".join(['1' if b else '0' for b in logits_bits])
+    print(adv_logits_str)
+    print(logits_str)
+
+    diff = (adv_logits_bits != logits_bits).sum()
+    print(f"Diff: {diff}")
 
     acc = ((adv_logits>=0) == (logits>=0)).float().mean(1).cpu().numpy()
     accs += acc.sum().item()
