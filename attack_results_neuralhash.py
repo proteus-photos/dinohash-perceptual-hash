@@ -52,14 +52,14 @@ for image_tensors, labels in tqdm(dataloader):
     forward_end = time.time()
 
     attack_start = time.time()
-    adv_images, _ = apgd.attack_single_run(image_tensors, logits, n_iter=10)
+    adv_images, _ = apgd.attack_single_run(image_tensors, logits, n_iter=20)
     attack_end = time.time()
 
     # Save the image after the attack for reference
     image_after_attack = adv_images[0] 
     to_pil(image_after_attack).save(f"image_after_attack.png")
 
-    adv_logits = neuralhash.forward(adv_images, c=20, logits=True)
+    adv_logits = neuralhash.forward(adv_images)
 
     adv_logits_bits = (adv_logits[0]>=0).flatten()
     logits_bits = (logits[0]>=0).flatten()
