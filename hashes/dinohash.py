@@ -114,6 +114,19 @@ class Hash:
         self.hex = hex(int(self.string, 2))
         self.array = self.tensor.numpy()
 
+model = "vits14_reg"
+# Load model
+dinov2 = torch.hub.load('facebookresearch/dinov2', f'dinov2_{model}').cuda()
+for param in dinov2.parameters():
+    param.requires_grad = False
+dinov2.eval()
+
+means = np.load(f'./hashes/dinov2_{model}_means.npy')
+means_torch = torch.from_numpy(means).cuda().float()
+
+components = np.load(f'./hashes/dinov2_{model}_PCA.npy').T
+components_torch = torch.from_numpy(components).cuda().float()
+
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 preprocess = transforms.Compose([
     transforms.Resize((224, 224)),
