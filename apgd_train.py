@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 from PIL import Image
 import torch
 from torch.optim import AdamW
+from adamwsp import AdamWSP
 from torch.utils.data import DataLoader, Dataset, random_split
 import numpy as np
 
@@ -21,7 +22,6 @@ from utils import AverageMeter
 torch.manual_seed(0)
 np.random.seed(0)
 torch.set_float32_matmul_precision("medium")
-
 
 class ImageDataset(Dataset):
     """Dataset class for loading and preprocessing images."""
@@ -122,7 +122,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         for param in self.adversarial_dinohash.dinov2.parameters():
             param.requires_grad = True
             
-        self.apgd = APGDAttack(
+        self.apgd =  APGDAttack(
             dinohash=self.adversarial_dinohash, 
             eps=args.epsilon
         )
@@ -130,7 +130,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.automatic_optimization = False
         
     def configure_optimizers(self) -> Dict[str, Any]:
-        optimizer = AdamW(
+        optimizer = AdamWSP(
             self.adversarial_dinohash.dinov2.parameters(),
             lr=args.lr,
             weight_decay=args.weight_decay,
@@ -141,7 +141,7 @@ class AdversarialDINOHashModule(L.LightningModule):
             if step < args.warmup:
                 return step / args.warmup
             else:
-                progress = (step - args.warmup) / (args.max_steps - args.warmup)
+                progress = (step - args.warmup) / (args.steps - args.warmup)
                 return 0.5 * (1 + np.cos(np.pi * progress))
         
         scheduler = {
@@ -155,6 +155,9 @@ class AdversarialDINOHashModule(L.LightningModule):
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         optimizer = self.optimizers()
         scheduler = self.lr_schedulers()
+        
+        # zero grads before backward so updates are applied
+        optimizer.zero_grad(set_to_none=True)
         
         logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
         
@@ -189,14 +192,13 @@ class AdversarialDINOHashModule(L.LightningModule):
         
         total_loss = adv_loss + clean_loss
         
-        optimizer.zero_grad()
         optimizer.step()
         scheduler.step()
         
         hashes = (logits >= 0).float()
         accuracy = (adv_hashes - hashes).abs().mean()
         
-        self.log('train/total_loss', total_loss, on_step=True, prog_bar=True)
+        self.log('train/total_loss', total_loss, on_step=True)
         self.log('train/adv_loss', adv_loss, on_step=True)
         self.log('train/clean_loss', clean_loss / max(args.clean_weight, 1), on_step=True)
         self.log('train/accuracy', accuracy * 100, on_step=True, prog_bar=True)
@@ -215,20 +217,14 @@ class AdversarialDINOHashModule(L.LightningModule):
                 batch, logits, n_iter=50, eps=args.epsilon
             )
             
-            adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
-            attack_accuracy = (adv_hashes - hashes).abs().mean()
-            
             clean_hashes = self.adversarial_dinohash.hash(batch).float()
             clean_accuracy = (clean_hashes - hashes).abs().mean()
+
+            adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
+            attack_accuracy = (adv_hashes - clean_hashes).abs().mean()
         
         self.log('val/attack_strength', attack_accuracy * 100, on_epoch=True, prog_bar=True)
         self.log('val/clean_error', clean_accuracy * 100, on_epoch=True, prog_bar=True)
-        
-        return {
-            'val/attack_strength': attack_accuracy * 100,
-            'val/clean_error': clean_accuracy * 100,
-            'batch_size': len(batch)
-        }
 
 def main():
     global args
@@ -240,7 +236,7 @@ def main():
     parser.add_argument('--n_iter_range', type=int, default=0, help='Maximum number of iterations')
     parser.add_argument('--epsilon', type=float, default=8/255, help='Maximum perturbation (L∞ norm bound)')
     parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
     parser.add_argument('--warmup', type=int, default=1400, help='Number of warmup steps')
     parser.add_argument('--steps', type=int, default=20000, help='Number of steps')
