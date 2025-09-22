@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from onnx import load_model, numpy_helper
 import math
-
+from PIL import Image
+import numpy as np
 
 class Conv2dDynamicSamePadding(nn.Conv2d):
     """Taken from https://github.com/lukemelas/EfficientNet-PyTorch/blob/7e8b0d312162f335785fb5dcfa1df29a75a1783a/efficientnet_pytorch/utils.py#L215"""
@@ -48,6 +49,11 @@ class NeuralHash(nn.Module):
     def __init__(self, onnx_model=None):
         super().__init__()
         self.layers = []
+
+        seed1 = open('hashes/neuralhash_128x96_seed1.dat', 'rb').read()[128:]
+        seed1 = np.frombuffer(seed1, dtype=np.float32)
+        seed1 = seed1.reshape([96, 128])
+        self.seed = torch.tensor(seed1).T.cuda()
 
         # Conv0
         self.conv0 = nn.Sequential(
@@ -456,3 +462,40 @@ class NeuralHash(nn.Module):
         # Final layers
         x = self.output(x)
         return x
+    
+    def hash(
+        self,
+        image_arrays,
+        differentiable: bool = False,
+        c: int = 1,
+        logits: bool = False,
+        l2_normalize: bool = False,
+        ) -> torch.Tensor:
+
+        wrapper = torch.no_grad if not differentiable else torch.enable_grad
+
+        if isinstance(image_arrays, np.ndarray):
+            image_arrays = torch.from_numpy(image_arrays)
+        if isinstance(image_arrays[0], Image.Image):
+            image_arrays = torch.stack([torch.tensor(np.array(im.convert('RGB')).transpose(2, 0, 1)) / 255.0 for im in image_arrays])
+        if isinstance(image_arrays[0], str):
+            image_arrays = torch.stack([torch.tensor(np.array(Image.open(im).convert('RGB')).transpose(2, 0, 1)) / 255.0 for im in image_arrays])
+
+        with wrapper():
+            image_arrays = image_arrays.cuda()
+            
+            outs = self.forward(image_arrays).squeeze(-1).squeeze(-1)
+            # outs = outs @ self.seed
+
+            if l2_normalize:
+                outs = torch.nn.functional.normalize(outs, dim=1)
+            outs *= c
+
+            if not logits:
+                if differentiable:
+                    outs = torch.sigmoid(outs)
+                else:
+                    outs = outs >= 0
+
+        del image_arrays
+        return outs
