@@ -403,7 +403,7 @@ class PGDAttack():
             x_adv = x + t + delta
         
         #### NO NOISE VERSION
-        # x_adv = x.clone()
+        x_adv = x.clone()
 
         x_adv = x_adv.clamp(0., 1.)
         x_best = x_adv.clone()

@@ -484,8 +484,8 @@ class NeuralHash(nn.Module):
         with wrapper():
             image_arrays = image_arrays.cuda()
             
-            outs = self.forward(image_arrays).squeeze(-1).squeeze(-1)
-            # outs = outs @ self.seed
+            outs = self.forward(image_arrays).squeeze(-1).squeeze(-1) / 30
+            outs = outs @ self.seed
 
             if l2_normalize:
                 outs = torch.nn.functional.normalize(outs, dim=1)
