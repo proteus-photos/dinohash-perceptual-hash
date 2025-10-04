@@ -5,8 +5,10 @@ from typing import Optional, List, Dict, Any
 from PIL import Image
 import torch
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset, random_split
+from adamsw import AdamWSP
+from torch.utils.data import DataLoader
 import numpy as np
+import webdataset as wds
 
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
@@ -14,7 +16,6 @@ from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 
 from hashes.dinohash import DINOHash, preprocess
 from apgd_attack import APGDAttack, criterion_loss
-from utils import AverageMeter
 
 
 # Set seeds for reproducibility
@@ -22,59 +23,46 @@ torch.manual_seed(0)
 np.random.seed(0)
 torch.set_float32_matmul_precision("medium")
 
-class ImageDataset(Dataset):
-    """Dataset class for loading and preprocessing images."""
-    
-    def __init__(self, image_files: List[str]):
-        self.image_files = image_files
-
-    def __len__(self) -> int:
-        return len(self.image_files)
-
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return preprocess(Image.open(self.image_files[idx]))
-
 
 class DINOHashDataModule(L.LightningDataModule):    
     def __init__(
         self, 
-        image_dir: str, 
         batch_size: int = 200, 
         split_ratio: float = 0.999,
         num_workers: int = 11
     ):
         super().__init__()
-        self.image_dir = image_dir
         self.batch_size = batch_size
         self.split_ratio = split_ratio
         self.num_workers = num_workers
         self.save_hyperparameters()
         
     def setup(self, stage: Optional[str] = None) -> None:
-        image_files = [
-            os.path.join(self.image_dir, f) 
-            for f in os.listdir(self.image_dir) 
-            if os.path.isfile(os.path.join(self.image_dir, f))
-        ]
-        image_files.sort()
-        image_files = image_files[:1_800_000]  # Keep original limitation
-        
-        dataset = ImageDataset(image_files)
-        
-        if stage == "fit" or stage is None:
-            train_size = int(self.split_ratio * len(dataset))
-            val_size = len(dataset) - train_size
-            self.train_dataset, self.val_dataset = random_split(
-                dataset, [train_size, val_size]
-            )
-            
-        self.complete_dataset = dataset
+        num_shards = 1159  # from {00000000..00001158}
+        split_point = int(num_shards * self.split_ratio)
+
+        train_pattern = f"/mnt/unified_dataset/shards/{{00000000..{split_point-1:08d}}}.tar"
+        val_pattern = f"/mnt/unified_dataset/shards/{{{split_point:08d}..{num_shards-1:08d}}}.tar"
+
+        self.train_dataset = (
+            wds.WebDataset(train_pattern, handler=wds.handlers.warn_and_continue)
+            .shuffle(10000)
+            .decode("pil")
+            .to_tuple("jpg")
+            .map(lambda x: preprocess(x[0]))
+        )
+
+        self.val_dataset = (
+            wds.WebDataset(val_pattern, handler=wds.handlers.warn_and_continue)
+            .decode("pil")
+            .to_tuple("jpg")
+            .map(lambda x: preprocess(x[0]))
+        )
         
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_dataset, 
             batch_size=self.batch_size, 
-            shuffle=True, 
             num_workers=self.num_workers
         )
         
@@ -82,7 +70,6 @@ class DINOHashDataModule(L.LightningDataModule):
         return DataLoader(
             self.val_dataset, 
             batch_size=self.batch_size, 
-            shuffle=False, 
             num_workers=self.num_workers
         )
         
@@ -90,7 +77,6 @@ class DINOHashDataModule(L.LightningDataModule):
         return DataLoader(
             self.complete_dataset, 
             batch_size=self.batch_size, 
-            shuffle=False
         )
 
 
@@ -129,7 +115,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.automatic_optimization = False
         
     def configure_optimizers(self) -> Dict[str, Any]:
-        optimizer = AdamW(
+        optimizer = AdamWSP(
             self.adversarial_dinohash.dinov2.parameters(),
             lr=args.lr,
             weight_decay=args.weight_decay,
@@ -154,7 +140,8 @@ class AdversarialDINOHashModule(L.LightningModule):
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         optimizer = self.optimizers()
         scheduler = self.lr_schedulers()
-        
+        optimizer.zero_grad()
+
         logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
         
         n_iter = np.random.randint(
@@ -188,7 +175,6 @@ class AdversarialDINOHashModule(L.LightningModule):
         
         total_loss = adv_loss + clean_loss
         
-        optimizer.zero_grad()
         optimizer.step()
         scheduler.step()
         
@@ -228,7 +214,6 @@ def main():
 
     parser = argparse.ArgumentParser(description='Adversarial neural collision attack with Lightning')
     parser.add_argument('--batch_size', type=int, default=200, help='Batch size for processing images')
-    parser.add_argument('--image_dir', type=str, default='./diffusion_data', help='Directory containing images')
     parser.add_argument('--n_iter', type=int, default=20, help='Average number of iterations')
     parser.add_argument('--n_iter_range', type=int, default=0, help='Maximum number of iterations')
     parser.add_argument('--epsilon', type=float, default=8/255, help='Maximum perturbation (L∞ norm bound)')
@@ -243,6 +228,8 @@ def main():
     parser.add_argument('--resume_path', type=str, default=None, help='Resume path')
     parser.add_argument('--n_bits', type=int, default=96, help='Number of PCA components for DINOHash')
     parser.add_argument('--model_name', type=str, default="vits14_reg", help='Model backbone for DINOv2')
+    parser.add_argument('--uap', action='store_true', help='Use UAP starting point')
+
     
     parser.add_argument('--project_name', type=str, default='adversarial-dinohash', help='Wandb project name')
     parser.add_argument('--experiment_name', type=str, default=None, help='Wandb experiment name')
@@ -251,9 +238,8 @@ def main():
     args = parser.parse_args()
     
     datamodule = DINOHashDataModule(
-        image_dir=args.image_dir,
         batch_size=args.batch_size,
-        split_ratio=0.999,
+        split_ratio=0.99,
         num_workers=11
     )
     
@@ -293,7 +279,7 @@ def main():
         callbacks=callbacks,
         # gradient_clip_val=1.0,
         # gradient_clip_algorithm="norm",
-        # precision="16-mixed",
+        precision="16-mixed",
         accelerator="auto",
         devices="auto",
         enable_progress_bar=True,
