@@ -3,26 +3,18 @@ import torch
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from sklearn.decomposition import PCA
 import numpy as np
+import webdataset as wds # Import webdataset
 
-class ImageDataset(Dataset):
-    def __init__(self, image_files, transform=None):
-        self.image_files = image_files
-        self.transform = transform
+num_shards = 150
 
-    def __len__(self):
-        return len(self.image_files)
-
-    def __getitem__(self, idx):
-        image = self.transform(Image.open(os.path.join(dataset_folder, self.image_files[idx])).convert("RGB"))
-        return image
+all_shards_pattern = f"/mnt/unified_dataset/shards/{{00000000..{num_shards-1:08d}}}.tar"
+print(f"Loading data from pattern: {all_shards_pattern}")
 
 
-dataset_folder = './diffusion_data'
-image_files = [f for f in os.listdir(dataset_folder)][:1_800_000]
-
+# --- Preprocessing and Model Setup (Unchanged) ---
 preprocess = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -30,20 +22,30 @@ preprocess = transforms.Compose([
 ])
 
 BATCH_SIZE = 1024
-
 model = "dinov2_vits14_reg"
-dataset = ImageDataset(image_files, transform=preprocess)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, drop_last=False)
 
+dataset = (
+    wds.WebDataset(all_shards_pattern, handler=wds.handlers.warn_and_continue)
+    .decode("pil") # Decode the image data into PIL images
+    .to_tuple("jpg") # Extract the file with the .jpg extension into a tuple
+    .map(lambda x: preprocess(x[0])) # Apply the preprocessing transform to the image
+)
+
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=11)
+
+# --- The rest of your script remains exactly the same ---
+print("Loading DINOv2 model...")
 dinov2 = torch.hub.load('facebookresearch/dinov2', model).cuda().eval()
 
+print("Extracting features...")
 outputs = []
 for images in tqdm(dataloader):
     images = images.cuda()
     with torch.no_grad():
         output = dinov2(images).cpu()
     outputs.append(output)
-        
+    
+print("Concatenating features...")
 outputs = torch.cat(outputs)
 means = outputs.mean(dim=0, keepdim=True)
 outputs -= means
@@ -52,6 +54,9 @@ pca = PCA(n_components=None, whiten=True)
 pca.fit(outputs)
 
 weights = pca.components_
+
+# Create directory for hashes if it doesn't exist
+os.makedirs("./hashes", exist_ok=True)
 
 np.save(f"./hashes/{model}_means", means.numpy())
 np.save(f"./hashes/{model}_PCA", weights)

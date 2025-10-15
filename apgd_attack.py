@@ -44,13 +44,13 @@ def criterion_loss(x, original_logits, hasher, loss, l2_normalize=False):
     # print(original_logits.flatten()[:10])
 
     hash = (hash > 0.5).float()
-    return hash, loss
+    return hash, loss, logits.detach()
 
 @torch.enable_grad()
 def hash_loss_grad(x, original_logits, hasher, loss="bce"):
     x.requires_grad = True
     
-    hash, loss = criterion_loss(x, original_logits, hasher, loss=loss, l2_normalize=True)
+    hash, loss, _ = criterion_loss(x, original_logits, hasher, loss=loss, l2_normalize=True)
 
     # contains overall sum of loss for batch, we dont use mean
     loss_sum = loss.sum()

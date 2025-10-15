@@ -50,7 +50,7 @@ class DataModule(L.LightningDataModule):
         )
 
         self.val_dataset = (
-            wds.WebDataset(val_pattern, handler=wds.handlers.warn_and_continue)
+            wds.WebDataset(val_pattern, handler=wds.handlers.warn_and_continue, empty_check=False)
             .decode("pil")
             .to_tuple("jpg")
             .map(lambda x: preprocess(x[0]))
@@ -68,7 +68,6 @@ class DataModule(L.LightningDataModule):
             self.val_dataset, 
             batch_size=self.batch_size, 
             num_workers=self.num_workers,
-            empty_check=False
         )
         
     def complete_dataloader(self) -> DataLoader:
@@ -159,30 +158,26 @@ class AdversarialDINOHashModule(L.LightningModule):
         logits = logits.to(self.device)
         batch = batch.to(self.device)
         
-        adv_images, _ = self.apgd.attack_single_run(
-            batch, logits, args.n_iter, log=False, eps=eps
+        _, clean_loss, adversarial_logits = criterion_loss(
+            batch, logits, self.adversarial_dinohash.hash, loss="target bce"
         )
-        
-        self.adversarial_dinohash.dinov2.train()
-        
-        adv_hashes, adv_loss = criterion_loss(
-            adv_images, logits, self.adversarial_dinohash.hash, loss="target bce"
+        clean_loss = args.clean_weight * clean_loss.mean()
+        self.manual_backward(clean_loss)
+
+        adv_images, _ = self.apgd.attack_single_run(
+            batch, adversarial_logits, scheduled_n_iter, log=False, eps=eps
+        )
+
+        adv_hashes, adv_loss, _ = criterion_loss(
+            adv_images, adversarial_logits.detach(), self.adversarial_dinohash.hash, loss="target bce"
         )
         adv_loss = adv_loss.mean()
         self.manual_backward(adv_loss)
-        
-        clean_loss = torch.tensor(0.0, device=self.device)
-        if args.clean_weight > 0:
-            clean_hashes, clean_loss = criterion_loss(
-                batch, logits, self.adversarial_dinohash.hash, loss="target bce"
-            )
-            clean_loss = args.clean_weight * clean_loss.mean()
-            self.manual_backward(clean_loss)
-        
-        total_loss = adv_loss + clean_loss
-        
+
         optimizer.step()
         scheduler.step()
+
+        total_loss = adv_loss + clean_loss
         
         hashes = (logits >= 0).float()
         accuracy = (adv_hashes - hashes).abs().mean()
@@ -199,14 +194,16 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.adversarial_dinohash.dinov2.eval()
         
         with torch.no_grad():
-            logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
-            hashes = (logits >= 0).float()
+            adversarial_logits = self.adversarial_dinohash.hash(batch, differentiable=False, logits=True).float()
             
             adv_images, _ = self.apgd.attack_single_run(
-                batch, logits, n_iter=50, eps=args.epsilon
+                batch, adversarial_logits, n_iter=50, eps=args.epsilon
             )
             
-            clean_hashes = self.adversarial_dinohash.hash(batch).float()
+            logits = self.adversarial_dinohash.hash(batch, differentiable=False, logits=True).float()
+            hashes = (logits >= 0).float()
+
+            clean_hashes = self.clean_dinohash.hash(batch).float()
             clean_accuracy = (clean_hashes - hashes).abs().mean()
 
             adv_hashes = self.adversarial_dinohash.hash(adv_images).float()
