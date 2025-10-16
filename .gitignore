@@ -22,3 +22,4 @@
 dinov2_vitb14_reg_512bit_dynamic.onnx
 dinov2_vits14_reg_96bit_dynamic.onnx
 *.ckpt
+/checkpoints/

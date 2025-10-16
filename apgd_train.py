@@ -81,49 +81,69 @@ class AdversarialDINOHashModule(L.LightningModule):
     def __init__(
         self,
         model_name: str = "vits14_reg",
+        version: str = 'v2',
         n_bits: int = 96,
+        epsilon: float = 8/255,
+        n_iter: int = 20,
+        attack_schedule: bool = False,
+        lr: float = 2e-4,
+        weight_decay: float = 1e-4,
+        warmup: int = 1400,
+        steps: int = 20000,
+        clean_weight: float = 500,
     ):
         super().__init__()
         self.save_hyperparameters()
         
+        self.epsilon = epsilon
+        self.n_iter = n_iter
+        self.attack_schedule = attack_schedule
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.warmup = warmup
+        self.steps = steps
+        self.clean_weight = clean_weight
+        
         self.clean_dinohash = DINOHash(
             model=model_name, 
             pca_dims=n_bits, 
-            prod_mode=False
+            prod_mode=False,
+            version=version
         )
         self.adversarial_dinohash = DINOHash(
             model=model_name, 
             pca_dims=n_bits, 
-            prod_mode=False
+            prod_mode=False,
+            version=version
         )
         
-        for param in self.clean_dinohash.dinov2.parameters():
+        for param in self.clean_dinohash.dino.parameters():
             param.requires_grad = False
-        self.clean_dinohash.dinov2.eval()
+        self.clean_dinohash.dino.eval()
         
-        for param in self.adversarial_dinohash.dinov2.parameters():
+        for param in self.adversarial_dinohash.dino.parameters():
             param.requires_grad = True
             
-        self.apgd =  APGDAttack(
+        self.apgd = APGDAttack(
             dinohash=self.adversarial_dinohash, 
-            eps=args.epsilon
+            eps=self.epsilon
         )
         
         self.automatic_optimization = False
         
     def configure_optimizers(self) -> Dict[str, Any]:
         optimizer = AdamWSP(
-            self.adversarial_dinohash.dinov2.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
+            self.adversarial_dinohash.dino.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
             betas=(0.9, 0.95)
         )
         
         def lr_lambda(step: int) -> float:
-            if step < args.warmup:
-                return step / args.warmup
+            if step < self.warmup:
+                return step / self.warmup
             else:
-                progress = (step - args.warmup) / (args.steps - args.warmup)
+                progress = (step - self.warmup) / (self.steps - self.warmup)
                 return 0.5 * (1 + np.cos(np.pi * progress))
         
         scheduler = {
@@ -135,10 +155,10 @@ class AdversarialDINOHashModule(L.LightningModule):
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
     
     def get_scheduled_n_iter(self, current_step: int) -> int:
-        if not args.attack_schedule:
-            return args.n_iter
-        progress = current_step / args.steps
-        scheduled_n_iter = int(1 + args.n_iter * progress)
+        if not self.attack_schedule:
+            return self.n_iter
+        progress = current_step / self.steps
+        scheduled_n_iter = int(1 + self.n_iter * progress)
         
         return scheduled_n_iter
     
@@ -153,7 +173,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         # Get the scheduled number of iterations based on current step
         scheduled_n_iter = self.get_scheduled_n_iter(self.global_step)
         
-        eps = np.random.uniform(0.5, 1.5) * args.epsilon
+        eps = np.random.uniform(0.5, 1.5) * self.epsilon
         
         logits = logits.to(self.device)
         batch = batch.to(self.device)
@@ -161,7 +181,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         _, clean_loss, adversarial_logits = criterion_loss(
             batch, logits, self.adversarial_dinohash.hash, loss="target bce"
         )
-        clean_loss = args.clean_weight * clean_loss.mean()
+        clean_loss = self.clean_weight * clean_loss.mean()
         self.manual_backward(clean_loss)
 
         adv_images, _ = self.apgd.attack_single_run(
@@ -184,20 +204,20 @@ class AdversarialDINOHashModule(L.LightningModule):
         
         self.log('train/total_loss', total_loss, on_step=True)
         self.log('train/adv_loss', adv_loss, on_step=True)
-        self.log('train/clean_loss', clean_loss / max(args.clean_weight, 1), on_step=True)
+        self.log('train/clean_loss', clean_loss / max(self.clean_weight, 1), on_step=True)
         self.log('train/accuracy', accuracy * 100, on_step=True, prog_bar=True)
         self.log('train/lr', optimizer.param_groups[0]['lr'], on_step=True)
         
         return total_loss
     
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> Dict[str, torch.Tensor]:
-        self.adversarial_dinohash.dinov2.eval()
+        self.adversarial_dinohash.dino.eval()
         
         with torch.no_grad():
             adversarial_logits = self.adversarial_dinohash.hash(batch, differentiable=False, logits=True).float()
             
             adv_images, _ = self.apgd.attack_single_run(
-                batch, adversarial_logits, n_iter=50, eps=args.epsilon
+                batch, adversarial_logits, n_iter=50, eps=self.epsilon
             )
             
             logits = self.adversarial_dinohash.hash(batch, differentiable=False, logits=True).float()
@@ -213,11 +233,10 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.log('val/clean_error', clean_accuracy * 100, on_epoch=True, prog_bar=True)
 
 def main():
-    global args
-
     parser = argparse.ArgumentParser(description='Adversarial neural collision attack with Lightning')
     parser.add_argument('--batch_size', type=int, default=200, help='Batch size for processing images')
     parser.add_argument('--n_iter', type=int, default=20, help='Final number of attack iterations')
+    parser.add_argument('--version', type=str, default='v2', choices=['v2', 'v3'], help='DINO version')
     parser.add_argument('--attack_schedule', action='store_true', help='Use linear attack schedule')
     parser.add_argument('--epsilon', type=float, default=8/255, help='Maximum perturbation (L∞ norm bound)')
     parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs')
@@ -229,9 +248,9 @@ def main():
     parser.add_argument('--val_freq', type=int, default=500, help='Validation frequency')
     parser.add_argument('--resume_path', type=str, default=None, help='Resume path')
     parser.add_argument('--n_bits', type=int, default=96, help='Number of PCA components for DINOHash')
-    parser.add_argument('--model_name', type=str, default="vits14_reg", help='Model backbone for DINOv2')
+    parser.add_argument('--model_name', type=str, default="vits14_reg", help='Model backbone for DINO')
     parser.add_argument('--uap', action='store_true', help='Use universal perturbation as start')
-
+    
     parser.add_argument('--project_name', type=str, default='adversarial-dinohash', help='Wandb project name')
     parser.add_argument('--experiment_name', type=str, default=None, help='Wandb experiment name')
     parser.add_argument('--offline', action='store_true', help='Run wandb in offline mode')
@@ -246,12 +265,21 @@ def main():
     
     model = AdversarialDINOHashModule(
         model_name=args.model_name,
+        version=args.version,
         n_bits=args.n_bits,
+        epsilon=args.epsilon,
+        n_iter=args.n_iter,
+        attack_schedule=args.attack_schedule,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        warmup=args.warmup,
+        steps=args.steps,
+        clean_weight=args.clean_weight,
     )
     
     if args.resume_path:
         checkpoint = torch.load(args.resume_path)
-        model.adversarial_dinohash.dinov2.load_state_dict(checkpoint)
+        model.adversarial_dinohash.dino.load_state_dict(checkpoint)
     
     wandb_logger = WandbLogger(
         project=args.project_name,
@@ -263,7 +291,7 @@ def main():
     callbacks = [
         ModelCheckpoint(
             dirpath=f"./checkpoints",
-            filename=f"dinov2_{args.model_name}{args.n_bits}.{args.lr}_{args.clean_weight}_{args.n_iter}_{{step}}",
+            filename=f"dino{args.version}_{args.model_name}{args.n_bits}.{args.lr}_{args.clean_weight}_{args.n_iter}_{{step}}",
             monitor="val/attack_strength",
             mode="max",
             save_top_k=1,

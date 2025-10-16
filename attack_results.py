@@ -13,7 +13,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from hashes.dinohash import DINOHash
 
-preprocess = lambda x: np.array(x.convert("RGB").resize([192, 192])).astype(np.float32) / 255.0
+preprocess = lambda x: np.array(x.convert("RGB").resize([360, 360])).astype(np.float32) / 255.0
 
 class ImageDataset(Dataset):
     def __init__(self, image_files):

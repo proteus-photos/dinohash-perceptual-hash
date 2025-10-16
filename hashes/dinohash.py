@@ -36,32 +36,39 @@ from PIL import Image
 from typing import Union, List
 import sys
 import torch.nn as nn
+from transformers import AutoImageProcessor, AutoModel
 
 class DINOHash(nn.Module):
-    def __init__(self, pca_dims=96, model="vits14_reg", prod_mode=True, random_hyperplanes=False):
+    def __init__(self, pca_dims=96, model="vits14_reg", version="v2", prod_mode=True, random_hyperplanes=False, device="cuda"):
         super(DINOHash, self).__init__()
         self.pca_dims = pca_dims
         self.model = model
         self.prod_mode = prod_mode
+        self.device = device
+        self.version = version
+
+        if version=="v2":
+            self.dino = torch.hub.load('facebookresearch/dinov2', f'dinov2_{self.model}').to(device)
+        elif version=="v3":
+            self.dino = AutoModel.from_pretrained(f"facebook/dinov3-{self.model}-pretrain-lvd1689m").to(device)
         
-        self.dinov2 = torch.hub.load('facebookresearch/dinov2', f'dinov2_{self.model}').cuda()
-        for param in self.dinov2.parameters():
+        for param in self.dino.parameters():
             param.requires_grad = False
+        self.dino.eval()
             
-        self.dinov2.eval()
         if random_hyperplanes:
             torch.manual_seed(pca_dims)
             self.components_torch = torch.randn((self.dinov2.embed_dim, self.pca_dims)).cuda().float()
             self.means_torch = torch.zeros((self.dinov2.embed_dim,)).cuda().float()
         else:
-            means = np.load(f'./hashes/dinov2_{self.model}_means.npy')
-            self.means_torch = torch.from_numpy(means).cuda().float()
+            means = np.load(f'./hashes/dino{version}_{self.model}_means.npy')
+            self.means_torch = torch.from_numpy(means).to(device).float()
 
-            components = np.load(f'./hashes/dinov2_{self.model}_PCA.npy').T
-            self.components_torch = torch.from_numpy(components).cuda().float()
+            components = np.load(f'./hashes/dino{version}_{self.model}_PCA.npy').T
+            self.components_torch = torch.from_numpy(components).to(device).float()
     
     def load_model(self, path):
-        self.dinov2.load_state_dict(torch.load(path, weights_only=True), strict=True)
+        self.dino.load_state_dict(torch.load(path, weights_only=True), strict=True)
     
     def hash(
         self,
@@ -83,8 +90,12 @@ class DINOHash(nn.Module):
 
         with wrapper():
             image_arrays = normalize(image_arrays.cuda())
-            
-            outs = self.dinov2(image_arrays) - self.means_torch
+            if self.version == "v2":
+                outs = self.dino(image_arrays)
+            else:
+                outs = self.dino(image_arrays).pooler_output
+
+            outs -= self.means_torch
             
             outs = outs @ self.components_torch
 
