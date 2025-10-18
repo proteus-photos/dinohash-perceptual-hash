@@ -91,6 +91,9 @@ class AdversarialDINOHashModule(L.LightningModule):
         warmup: int = 1400,
         steps: int = 20000,
         clean_weight: float = 500,
+        uap: bool = False,
+        use_amp: bool = True,
+        gradient_clip_val: float = 1.0
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -103,6 +106,8 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.warmup = warmup
         self.steps = steps
         self.clean_weight = clean_weight
+        self.use_amp = use_amp
+        self.gradient_clip_val = gradient_clip_val
         
         self.clean_dinohash = DINOHash(
             model=model_name, 
@@ -126,10 +131,15 @@ class AdversarialDINOHashModule(L.LightningModule):
             
         self.apgd = APGDAttack(
             dinohash=self.adversarial_dinohash, 
-            eps=self.epsilon
+            eps=self.epsilon,
+            uap=uap
         )
         
         self.automatic_optimization = False
+        
+        # Initialize GradScaler for mixed precision
+        if self.use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
         
     def configure_optimizers(self) -> Dict[str, Any]:
         optimizer = AdamWSP(
@@ -168,45 +178,87 @@ class AdversarialDINOHashModule(L.LightningModule):
         
         optimizer.zero_grad(set_to_none=True)
         
-        logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
+        batch = batch.to(self.device)
+        
+        # Get clean logits (no autocast for frozen model)
+        with torch.no_grad():
+            logits = self.clean_dinohash.hash(batch, differentiable=False, logits=True).float()
         
         # Get the scheduled number of iterations based on current step
         scheduled_n_iter = self.get_scheduled_n_iter(self.global_step)
         
         eps = np.random.uniform(0.5, 1.5) * self.epsilon
         
-        logits = logits.to(self.device)
-        batch = batch.to(self.device)
+        # Clean loss computation with autocast
+        if self.use_amp:
+            with torch.cuda.amp.autocast():
+                _, clean_loss, adversarial_logits = criterion_loss(
+                    batch, logits, self.adversarial_dinohash.hash, loss="target bce"
+                )
+                clean_loss = self.clean_weight * clean_loss.mean()
+            
+            # Scale and backward
+            self.scaler.scale(clean_loss).backward()
+        else:
+            _, clean_loss, adversarial_logits = criterion_loss(
+                batch, logits, self.adversarial_dinohash.hash, loss="target bce"
+            )
+            clean_loss = self.clean_weight * clean_loss.mean()
+            clean_loss.backward()
+
+        # Generate adversarial examples (outside autocast for stability)
+        with torch.no_grad():
+            adv_images, _ = self.apgd.attack_single_run(
+                batch, adversarial_logits.detach(), scheduled_n_iter, log=False, eps=eps
+            )
+
+        if self.use_amp:
+            with torch.cuda.amp.autocast():
+                adv_hashes, adv_loss, _ = criterion_loss(
+                    adv_images, adversarial_logits.detach(), self.adversarial_dinohash.hash, loss="target bce"
+                )
+                adv_loss = adv_loss.mean()
+            
+            self.scaler.scale(adv_loss).backward()
+            self.scaler.unscale_(optimizer)
+        else:
+            adv_hashes, adv_loss, _ = criterion_loss(
+                adv_images, adversarial_logits.detach(), self.adversarial_dinohash.hash, loss="target bce"
+            )
+            adv_loss = adv_loss.mean()
+            adv_loss.backward()
         
-        _, clean_loss, adversarial_logits = criterion_loss(
-            batch, logits, self.adversarial_dinohash.hash, loss="target bce"
-        )
-        clean_loss = self.clean_weight * clean_loss.mean()
-        self.manual_backward(clean_loss)
-
-        adv_images, _ = self.apgd.attack_single_run(
-            batch, adversarial_logits, scheduled_n_iter, log=False, eps=eps
-        )
-
-        adv_hashes, adv_loss, _ = criterion_loss(
-            adv_images, adversarial_logits.detach(), self.adversarial_dinohash.hash, loss="target bce"
-        )
-        adv_loss = adv_loss.mean()
-        self.manual_backward(adv_loss)
-
-        optimizer.step()
+        if self.gradient_clip_val > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.adversarial_dinohash.dino.parameters(), 
+                self.gradient_clip_val
+            )
+            self.log('train/grad_norm', grad_norm, on_step=True)
+        
+        # Optimizer step with scaler
+        if self.use_amp:
+            self.scaler.step(optimizer)
+            self.scaler.update()
+        else:
+            optimizer.step()
+        
         scheduler.step()
 
         total_loss = adv_loss + clean_loss
         
-        hashes = (logits >= 0).float()
-        accuracy = (adv_hashes - hashes).abs().mean()
+        # Metrics computation (no gradient needed)
+        with torch.no_grad():
+            hashes = (logits >= 0).float()
+            accuracy = (adv_hashes - hashes).abs().mean()
         
         self.log('train/total_loss', total_loss, on_step=True)
         self.log('train/adv_loss', adv_loss, on_step=True)
         self.log('train/clean_loss', clean_loss / max(self.clean_weight, 1), on_step=True)
         self.log('train/accuracy', accuracy * 100, on_step=True, prog_bar=True)
         self.log('train/lr', optimizer.param_groups[0]['lr'], on_step=True)
+        
+        if self.use_amp:
+            self.log('train/scale', self.scaler.get_scale(), on_step=True)
         
         return total_loss
     
@@ -250,6 +302,8 @@ def main():
     parser.add_argument('--n_bits', type=int, default=96, help='Number of PCA components for DINOHash')
     parser.add_argument('--model_name', type=str, default="vits14_reg", help='Model backbone for DINO')
     parser.add_argument('--uap', action='store_true', help='Use universal perturbation as start')
+    parser.add_argument('--gradient_clip_val', type=float, default=1.0, help='Gradient clipping value')
+    parser.add_argument('--no_amp', action='store_true', help='Disable automatic mixed precision')
     
     parser.add_argument('--project_name', type=str, default='adversarial-dinohash', help='Wandb project name')
     parser.add_argument('--experiment_name', type=str, default=None, help='Wandb experiment name')
@@ -275,6 +329,9 @@ def main():
         warmup=args.warmup,
         steps=args.steps,
         clean_weight=args.clean_weight,
+        uap=args.uap,
+        use_amp=not args.no_amp,
+        gradient_clip_val=args.gradient_clip_val
     )
     
     if args.resume_path:
@@ -306,9 +363,6 @@ def main():
         val_check_interval=args.val_freq,
         logger=wandb_logger,
         callbacks=callbacks,
-        # gradient_clip_val=1.0,
-        # gradient_clip_algorithm="norm",
-        # precision="16-mixed",
         accelerator="auto",
         devices="auto",
         enable_progress_bar=True,

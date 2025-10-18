@@ -2,6 +2,8 @@ import torch
 import math
 from torch.nn.functional import binary_cross_entropy_with_logits
 
+MOMENTUM = 0.9
+
 def L1_norm(x, keepdim=False):
     z = x.abs().view(x.shape[0], -1).sum(-1)
     if keepdim:
@@ -133,6 +135,7 @@ class APGDAttack():
             rho=.75,
             topk=None,
             verbose=False,
+            uap=False,
             device="cuda"):
         
         self.hasher = dinohash.hash
@@ -144,6 +147,10 @@ class APGDAttack():
         self.verbose = verbose
         self.device = device
         self.use_rs = True
+        self.uap = uap
+
+        if self.uap:
+            self.noise = None
 
         assert self.norm in ['Linf', 'L2', 'L1']
 
@@ -188,22 +195,29 @@ class APGDAttack():
         self.n_iter_min = max(int(0.06 * self.n_iter), 1)
         self.size_decr = max(int(0.03 * self.n_iter), 1)
 
-        if self.norm == 'Linf':
-            t = 2 * torch.rand(x.shape).to(self.device).detach() - 1
-            x_adv = x + self.eps * torch.ones_like(x
-                ).detach() * self.normalize(t)
-        elif self.norm == 'L2':
-            t = torch.randn(x.shape).to(self.device).detach()
-            x_adv = x + self.eps * torch.ones_like(x
-                ).detach() * self.normalize(t)
-        elif self.norm == 'L1':
-            t = torch.randn(x.shape).to(self.device).detach()
-            delta = L1_projection(x, t, self.eps)
-            x_adv = x + t + delta
+        # if self.norm == 'Linf':
+        #     t = 2 * torch.rand(x.shape).to(self.device).detach() - 1
+        #     x_adv = x + self.eps * torch.ones_like(x
+        #         ).detach() * self.normalize(t)
+        # elif self.norm == 'L2':
+        #     t = torch.randn(x.shape).to(self.device).detach()
+        #     x_adv = x + self.eps * torch.ones_like(x
+        #         ).detach() * self.normalize(t)
+        # elif self.norm == 'L1':
+        #     t = torch.randn(x.shape).to(self.device).detach()
+        #     delta = L1_projection(x, t, self.eps)
+        #     x_adv = x + t + delta
         
         #### NO NOISE VERSION
+
+        if self.uap and self.noise is not None:
+            self.noise = torch.zeros_like(x[0]).to(self.device).unsqueeze(0)
+
         x_adv = x.clone()
 
+        if self.uap:
+            x_adv = project(x_adv + torch.sign(self.noise), x, self.eps)
+            
         x_adv = x_adv.clamp(0., 1.)
         x_best = x_adv.clone()
 
@@ -324,7 +338,11 @@ class APGDAttack():
                     grad[fl_redtopk] = grad_best[fl_redtopk].clone()
                 
                 counter3 = 0
-    
+
+        if self.uap:
+            current_noise = (x_best - x).mean(0, keepdim=True)
+            self.noise = self.noise * MOMENTUM + current_noise * (1. - MOMENTUM)
+
         return (x_best, loss_best)
 
 class PGDAttack():
