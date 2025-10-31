@@ -1,25 +1,37 @@
 import argparse
 import os
+import random
 from typing import Optional, List, Dict, Any
-
 from PIL import Image
 import torch
 from torch.optim import AdamW
 from adamwsp import AdamWSP
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader
 import numpy as np
 import webdataset as wds
 
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 
 from hashes.dinohash import DINOHash, preprocess
 from apgd_attack import APGDAttack, criterion_loss
+from transformer import Transformer
 
 torch.manual_seed(0)
 np.random.seed(0)
 torch.set_float32_matmul_precision("medium")
+
+t = Transformer()
+def combined_transform(image):
+    transformations = ["erase", "screenshot", "brightness", "text", "contrast", "median"]
+    # transformations = []
+    random.shuffle(transformations)
+
+    for transform in transformations:
+        if random.random() < 0.5:
+            image = t.transform(image, method=transform)
+    return image
 
 class DataModule(L.LightningDataModule):    
     def __init__(
@@ -46,7 +58,7 @@ class DataModule(L.LightningDataModule):
             .shuffle(10000)
             .decode("pil")
             .to_tuple("jpg")
-            .map(lambda x: preprocess(x[0]))
+            .map(lambda x: (preprocess(x[0]), preprocess(combined_transform(x[0]))))
         )
 
         self.val_dataset = (
@@ -93,7 +105,8 @@ class AdversarialDINOHashModule(L.LightningModule):
         clean_weight: float = 500,
         uap: bool = False,
         use_amp: bool = True,
-        gradient_clip_val: float = 1.0
+        gradient_clip_val: float = 1.0,
+        lr_schedule: str = "cosine",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -108,6 +121,7 @@ class AdversarialDINOHashModule(L.LightningModule):
         self.clean_weight = clean_weight
         self.use_amp = use_amp
         self.gradient_clip_val = gradient_clip_val
+        self.lr_schedule = lr_schedule
         
         self.clean_dinohash = DINOHash(
             model=model_name, 
@@ -149,18 +163,52 @@ class AdversarialDINOHashModule(L.LightningModule):
             betas=(0.9, 0.95)
         )
         
-        def lr_lambda(step: int) -> float:
-            if step < self.warmup:
-                return step / self.warmup
-            else:
-                progress = (step - self.warmup) / (self.steps - self.warmup)
-                return 0.5 * (1 + np.cos(np.pi * progress))
-        
-        scheduler = {
-            'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda),
-            'interval': 'step',
-            'frequency': 1,
-        }
+        if self.lr_schedule == "cosine":
+            # Cosine annealing with warmup
+            def lr_lambda(step: int) -> float:
+                if step < self.warmup:
+                    return step / self.warmup
+                else:
+                    progress = (step - self.warmup) / (self.steps - self.warmup)
+                    return 0.5 * (1 + np.cos(np.pi * progress))
+            
+            scheduler = {
+                'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda),
+                'interval': 'step',
+                'frequency': 1,
+            }
+            
+        elif self.lr_schedule == "constant":
+            # Constant LR after warmup
+            def lr_lambda(step: int) -> float:
+                if step < self.warmup:
+                    return step / self.warmup
+                else:
+                    return 1.0
+            
+            scheduler = {
+                'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda),
+                'interval': 'step',
+                'frequency': 1,
+            }
+            
+        elif self.lr_schedule == "cyclic":
+            base_scheduler = torch.optim.lr_scheduler.CyclicLR(
+                optimizer,
+                base_lr=self.lr/10,
+                max_lr=self.lr,
+                step_size_up=self.steps / self.n_iter,
+                mode='triangular',
+                cycle_momentum=False
+            )  
+            
+            scheduler = {
+                'scheduler': base_scheduler,
+                'interval': 'step',
+                'frequency': 1,
+            }
+        else:
+            raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
         
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
     
@@ -172,13 +220,15 @@ class AdversarialDINOHashModule(L.LightningModule):
         
         return scheduled_n_iter
     
-    def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
+    def training_step(self, data: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        batch, transformed_batch = data
         optimizer = self.optimizers()
         scheduler = self.lr_schedulers()
         
         optimizer.zero_grad(set_to_none=True)
         
         batch = batch.to(self.device)
+        transformed_batch = transformed_batch.to(self.device)
         
         # Get clean logits (no autocast for frozen model)
         with torch.no_grad():
@@ -187,13 +237,13 @@ class AdversarialDINOHashModule(L.LightningModule):
         # Get the scheduled number of iterations based on current step
         scheduled_n_iter = self.get_scheduled_n_iter(self.global_step)
         
-        eps = np.random.uniform(0.5, 1.5) * self.epsilon
+        eps = np.random.uniform(0.25, 1.5) * self.epsilon
         
         # Clean loss computation with autocast
         if self.use_amp:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 _, clean_loss, adversarial_logits = criterion_loss(
-                    batch, logits, self.adversarial_dinohash.hash, loss="target bce"
+                    transformed_batch, logits, self.adversarial_dinohash.hash, loss="target bce"
                 )
                 clean_loss = self.clean_weight * clean_loss.mean()
             
@@ -201,7 +251,7 @@ class AdversarialDINOHashModule(L.LightningModule):
             self.scaler.scale(clean_loss).backward()
         else:
             _, clean_loss, adversarial_logits = criterion_loss(
-                batch, logits, self.adversarial_dinohash.hash, loss="target bce"
+                transformed_batch, logits, self.adversarial_dinohash.hash, loss="target bce"
             )
             clean_loss = self.clean_weight * clean_loss.mean()
             clean_loss.backward()
@@ -209,11 +259,11 @@ class AdversarialDINOHashModule(L.LightningModule):
         # Generate adversarial examples (outside autocast for stability)
         with torch.no_grad():
             adv_images, _ = self.apgd.attack_single_run(
-                batch, adversarial_logits.detach(), scheduled_n_iter, log=False, eps=eps
+                transformed_batch, adversarial_logits.detach(), scheduled_n_iter, log=False, eps=eps
             )
 
         if self.use_amp:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 adv_hashes, adv_loss, _ = criterion_loss(
                     adv_images, adversarial_logits.detach(), self.adversarial_dinohash.hash, loss="target bce"
                 )
@@ -304,6 +354,11 @@ def main():
     parser.add_argument('--uap', action='store_true', help='Use universal perturbation as start')
     parser.add_argument('--gradient_clip_val', type=float, default=1.0, help='Gradient clipping value')
     parser.add_argument('--no_amp', action='store_true', help='Disable automatic mixed precision')
+
+    # Learning rate schedule arguments
+    parser.add_argument('--lr_schedule', type=str, default='cosine', 
+                        choices=['cosine', 'constant', 'cyclic'],
+                        help='Learning rate schedule: cosine (decay with warmup), constant (with warmup), or cyclic')
     
     parser.add_argument('--project_name', type=str, default='adversarial-dinohash', help='Wandb project name')
     parser.add_argument('--experiment_name', type=str, default=None, help='Wandb experiment name')
@@ -331,7 +386,8 @@ def main():
         clean_weight=args.clean_weight,
         uap=args.uap,
         use_amp=not args.no_amp,
-        gradient_clip_val=args.gradient_clip_val
+        gradient_clip_val=args.gradient_clip_val,
+        lr_schedule=args.lr_schedule,
     )
     
     if args.resume_path:
@@ -340,7 +396,7 @@ def main():
     
     wandb_logger = WandbLogger(
         project=args.project_name,
-        name=args.experiment_name or f"dinohash_{args.lr}_{args.clean_weight}_{args.n_iter}",
+        name=args.experiment_name or f"dinohash_{args.lr}_{args.clean_weight}_{args.n_iter}_{args.lr_schedule}",
         offline=args.offline,
         save_dir="./logs"
     )
@@ -370,7 +426,6 @@ def main():
     )
     
     trainer.fit(model, datamodule=datamodule)
-    
     print("Training completed!")
 
 

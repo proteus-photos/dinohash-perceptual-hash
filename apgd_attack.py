@@ -2,7 +2,7 @@ import torch
 import math
 from torch.nn.functional import binary_cross_entropy_with_logits
 
-MOMENTUM = 0.9
+MOMENTUM = 0.5
 
 def L1_norm(x, keepdim=False):
     z = x.abs().view(x.shape[0], -1).sum(-1)
@@ -33,9 +33,8 @@ def criterion_loss(x, original_logits, hasher, loss, l2_normalize=False):
         loss = loss.view(x.shape[0], -1).mean(1)
         hash = torch.sigmoid(logits)
     elif loss=="target bce":
-        SCALE = 10
         logits = hasher(x, differentiable=True, c=1, logits=True, l2_normalize=l2_normalize)
-        loss = binary_cross_entropy_with_logits(logits.flatten() * SCALE, torch.sigmoid(original_logits * SCALE).flatten(), reduction="none")
+        loss = binary_cross_entropy_with_logits(logits.flatten(), original_hash.flatten(), reduction="none")
         # we unflatten and average the loss (across bits) to have one loss per image       
         loss = loss.view(x.shape[0], -1).mean(1)
         hash = torch.sigmoid(logits)
@@ -210,7 +209,7 @@ class APGDAttack():
         
         #### NO NOISE VERSION
 
-        if self.uap and self.noise is not None:
+        if self.uap and self.noise is None:
             self.noise = torch.zeros_like(x[0]).to(self.device).unsqueeze(0)
 
         x_adv = x.clone()
