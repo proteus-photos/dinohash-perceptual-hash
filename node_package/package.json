@@ -16,7 +16,7 @@
     "license": "MIT",
     "dependencies": {
         "@proteus-labs/dinohash": "^1.4.0",
-        "axios": "1.8.4",
+        "axios": "1.12.2",
         "fs-extra": "11.3.0",
         "jimp": "1.6.0",
         "onnxruntime-node": "1.21.0",
